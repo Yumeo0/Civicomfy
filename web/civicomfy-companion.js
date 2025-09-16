@@ -511,10 +511,107 @@
     }, 5000);
   }
 
+  /** Extract model version ID from download links **/
+  function extractModelVersionId(dlBtn) {
+
+    // First, try to get it from the button's href if it's an anchor tag with a direct download link
+    if (dlBtn.tagName.toLowerCase() === 'a') {
+      try {
+        const href = dlBtn.getAttribute("href");
+
+        if (href && href !== "#") {
+          const absoluteHref = new URL(href, window.location.origin);
+          const parts = absoluteHref.pathname.split("/");
+          const versionId = parts[parts.length - 1];
+          return versionId;
+        }
+      } catch (e) {
+        console.error("[Civicomfy] Failed to parse model_version_id from href", e, dlBtn.href);
+      }
+    }
+
+    // If that fails, look for menu items with type=Model parameter
+    // This handles cases where the download button opens a picker
+    try {
+      // Look for menu dropdown items with type=Model
+      const menuItems = document.querySelectorAll('a[href*="type=Model"]');
+
+      for (const item of menuItems) {
+        const href = item.getAttribute("href");
+
+        if (href) {
+          const url = new URL(href, window.location.origin);
+          // Look for pattern like /api/download/models/1639019?type=Model
+          const modelIdMatch = url.pathname.match(/\/api\/download\/models\/(\d+)/);
+          if (modelIdMatch && modelIdMatch[1]) {
+            return modelIdMatch[1];
+          }
+        }
+      }
+    } catch (e) {
+      console.error("[Civicomfy] Failed to parse model_version_id from menu items", e);
+    }
+
+    return null;
+  }
+
+  /** Force open picker menu to extract model version ID **/
+  function forceExtractModelVersionId(dlBtn) {
+
+    return new Promise((resolve) => {
+      // First try normal extraction
+      let modelVersionId = extractModelVersionId(dlBtn);
+      if (modelVersionId) {
+        resolve(modelVersionId);
+        return;
+      }
+
+      // If that fails, try to trigger the picker menu
+      try {
+        // Click the download button to open the picker
+        dlBtn.click();
+
+        // Wait a short moment for the menu to appear
+        setTimeout(() => {
+          // Try to extract from the menu items
+          modelVersionId = extractModelVersionId(dlBtn);
+
+          // Close the menu by clicking outside or pressing escape
+          try {
+            // Try clicking the overlay/background to close the menu
+            const overlay = document.querySelector('.mantine-Menu-dropdown');
+
+            if (overlay) {
+              // Click outside the menu to close it
+              document.body.click();
+            } else {
+              // If no overlay found, try pressing escape
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+            }
+          } catch (closeError) {
+            console.warn("[Civicomfy] Could not close picker menu", closeError);
+          }
+
+          resolve(modelVersionId);
+        }, 150); // Give menu time to appear
+
+      } catch (clickError) {
+        console.error("[Civicomfy] Failed to trigger picker menu", clickError);
+        resolve(null);
+      }
+    });
+  }
+
   /** Add comfy button **/
   function addButton() {
-    const dlBtn = document.querySelector('a[data-tour="model:download"]');
-    if (!dlBtn || dlBtn.dataset.comfyInjected) return;
+
+    // Look for both button and a tags with the download tour attribute
+    const dlBtn = document.querySelector('a[data-tour="model:download"], button[data-tour="model:download"]');
+
+    if (!dlBtn || dlBtn.dataset.comfyInjected) {
+      return;
+    }
+
     dlBtn.dataset.comfyInjected = "true";
 
     // Extract model id
@@ -522,14 +619,7 @@
     const modelId = modelMatch ? modelMatch[1] : null;
 
     // Extract model_version_id
-    let modelVersionId = null;
-    try {
-      const absoluteHref = new URL(dlBtn.getAttribute("href"), window.location.origin);
-      const parts = absoluteHref.pathname.split("/");
-      modelVersionId = parts[parts.length - 1];
-    } catch (e) {
-      console.error("Failed to parse model_version_id", e, dlBtn.href);
-    }
+    let modelVersionId = extractModelVersionId(dlBtn);
 
     // Build comfy button
     const comfyBtn = document.createElement("a");
@@ -546,9 +636,17 @@
     comfyBtn.appendChild(logo);
 
     // Click handler - shows download options modal
-    comfyBtn.addEventListener("click", (e) => {
+    comfyBtn.addEventListener("click", async (e) => {
       e.preventDefault();
+
+      // Re-attempt to get model version ID in case it wasn't available initially
+      if (!modelVersionId) {
+        showToast("Detecting model version...", "info");
+        modelVersionId = await forceExtractModelVersionId(dlBtn);
+      }
+
       if (!modelId || !modelVersionId) {
+        console.error("[Civicomfy] Missing required IDs");
         showToast("Could not detect model id or version id", "error");
         return;
       }
@@ -559,9 +657,17 @@
     });
 
     // Right-click handler - direct download with saved settings
-    comfyBtn.addEventListener("contextmenu", (e) => {
+    comfyBtn.addEventListener("contextmenu", async (e) => {
       e.preventDefault();
+
+      // Re-attempt to get model version ID in case it wasn't available initially
+      if (!modelVersionId) {
+        showToast("Detecting model version...", "info");
+        modelVersionId = await forceExtractModelVersionId(dlBtn);
+      }
+
       if (!modelId || !modelVersionId) {
+        console.error("[Civicomfy] Missing required IDs for direct download");
         showToast("Could not detect model id or version id", "error");
         return;
       }
@@ -853,7 +959,10 @@
   // Register menu command
   GM_registerMenuCommand("Settings", showSettingsModal);
 
-  const observer = new MutationObserver(addButton);
+  const observer = new MutationObserver(() => {
+    addButton();
+  });
   observer.observe(document.body, { childList: true, subtree: true });
+
   addButton();
 })();
